@@ -1,0 +1,240 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.NUMERIC_STD.ALL;
+
+entity fsm_cyclone4FPGAV1 is
+    Port (
+        -- Entradas globales y de control
+        clk           : in  STD_LOGIC; -- 50 MHz
+        reset         : in  STD_LOGIC; -- KEY1
+        sensor_pass   : in  STD_LOGIC; -- KEY2
+        btn_open      : in  STD_LOGIC; -- KEY3
+        
+        -- Salidas físicas (Activas en Bajo)
+        motor_open    : out STD_LOGIC;
+        led_alarm     : out STD_LOGIC;
+        
+        -- Para el display de 7 segmentos (Activo en Bajo)
+        segmentos     : out STD_LOGIC_VECTOR(6 downto 0);
+        digito_sel    : out STD_LOGIC_VECTOR(3 downto 0);
+		  -- Variable para depuracion en el visualizador de WAVEFORM
+		  debug_state   : out STD_LOGIC_VECTOR(6 downto 0)
+    );
+end fsm_cyclone4FPGAV1;
+
+architecture RTL of fsm_cyclone4FPGAV1 is
+    
+    type T_state is (LOCKED, OPENING, OPENED, PASSING, CLOSING, ALARM_STATE);
+    signal state : T_state := LOCKED;
+
+    -- Señales limpias después del filtro de rebotes
+    signal btn_open_clean    : STD_LOGIC := '1';
+    signal sensor_pass_clean : STD_LOGIC := '1';
+    signal reset_clean       : STD_LOGIC := '1';
+
+    -- Registros para detectar el flanco de bajada limpio
+    signal btn_open_reg        : STD_LOGIC := '1';
+    signal btn_open_falling    : STD_LOGIC := '0';
+    
+    signal sensor_pass_reg     : STD_LOGIC := '1';
+    signal sensor_pass_falling : STD_LOGIC := '0';
+    
+    signal reset_reg           : STD_LOGIC := '1';
+    signal reset_falling       : STD_LOGIC := '0';
+
+    -- Constante para el filtro antirebote (40 ms)
+    constant DEBOUNCE_LIMIT : integer := 2000000;
+    
+    -- Contadores independientes para el antirebote
+    signal count_open   : integer range 0 to DEBOUNCE_LIMIT := 0;
+    signal count_sensor : integer range 0 to DEBOUNCE_LIMIT := 0;
+    signal count_reset  : integer range 0 to DEBOUNCE_LIMIT := 0;
+
+    -----------------------------------------------------------------
+    -- NUEVAS CONSTANTES Y SEÑALES PARA EL TEMPORIZADOR DE 5 SEGUNDOS
+    -----------------------------------------------------------------
+    -- 50 MHz * 5 segundos = 250,000,000 ciclos de reloj
+	 
+    constant TIMER_5S_LIMIT : integer := 250000000;
+	 --constant TIMER_5S_LIMIT : integer := 10;
+    signal timer_count       : integer range 0 to TIMER_5S_LIMIT := 0;
+
+begin
+
+    -- Activar los 4 dígitos del bloque (Ánodo común = '0' enciende)
+    digito_sel <= "0000";
+
+    -- Proceso secuencial síncrono
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            
+            -----------------------------------------------------------------
+            -- 1. FILTROS ANTIREBOTE (DEBOUNCERS) POR HARDWARE
+            -----------------------------------------------------------------
+            if btn_open = '0' then
+                if count_open < DEBOUNCE_LIMIT then
+                    count_open <= count_open + 1;
+                else
+                    btn_open_clean <= '0';
+                end if;
+            else
+                count_open <= 0;
+                btn_open_clean <= '1';
+            end if;
+
+            if sensor_pass = '0' then
+                if count_sensor < DEBOUNCE_LIMIT then
+                    count_sensor <= count_sensor + 1;
+                else
+                    sensor_pass_clean <= '0';
+                end if;
+            else
+                count_sensor <= 0;
+                sensor_pass_clean <= '1';
+            end if;
+
+            if reset = '0' then
+                if count_reset < DEBOUNCE_LIMIT then
+                    count_reset <= count_reset + 1;
+                else
+                    reset_clean <= '0';
+                end if;
+            else
+                count_reset <= 0;
+                reset_clean <= '1';
+            end if;
+
+            -----------------------------------------------------------------
+            -- 2. DETECTOR DE FLANCO DE BAJADA
+            -----------------------------------------------------------------
+            btn_open_reg        <= btn_open_clean;
+            sensor_pass_reg     <= sensor_pass_clean;
+            reset_reg           <= reset_clean;
+            
+            btn_open_falling    <= (not btn_open_clean) and btn_open_reg;
+            sensor_pass_falling <= (not sensor_pass_clean) and sensor_pass_reg;
+            reset_falling       <= (not reset_clean) and reset_reg;
+
+            -----------------------------------------------------------------
+            -- 3. MÁQUINA DE ESTADOS FINITOS (FSM) CON TEMPORIZACIÓN
+            -----------------------------------------------------------------
+            -- Valores por defecto (Lógica inversa: '1' apaga/desactiva)
+            motor_open <= '1'; 
+            led_alarm  <= '1';
+
+            if reset_falling = '1' then
+                state       <= LOCKED;
+                timer_count <= 0; -- Reiniciar temporizador en reset
+            else
+                case state is
+                    
+                    when LOCKED =>
+                        timer_count <= 0; -- Mantener el contador en 0 mientras no se use
+                        if btn_open_falling = '1' then
+                            state <= OPENING;
+                        end if;
+
+                    when OPENING =>
+                        motor_open <= '0'; -- Motor encendido (M=0)
+                        
+                        -- Prioridad 1: Interrupción por Sensor (Alarma)
+                        if sensor_pass_falling = '1' then
+                            state       <= ALARM_STATE;
+                            timer_count <= 0;
+                        -- Prioridad 2: Control del tiempo (5 segundos)
+                        elsif timer_count >= (TIMER_5S_LIMIT - 1) then
+                            state       <= OPENED;
+                            timer_count <= 0; -- Resetear para la siguiente etapa
+                        else
+                            timer_count <= timer_count + 1; -- Incrementar tiempo
+                        end if;
+
+                    when OPENED =>
+                        timer_count <= 0; 
+                        motor_open  <= '1'; -- Motor apagado (M=1)
+                        if sensor_pass_falling = '1' then
+                            state <= PASSING;
+                        end if;
+
+                    when PASSING =>
+                        timer_count <= 0;
+                        -- Prioridad 1: Interrupción por botón (Alarma)
+                        if btn_open_falling = '1' then
+                            state <= ALARM_STATE;
+                        -- Prioridad 2: El auto termina de pasar
+                        elsif sensor_pass_falling = '1' then
+                            state <= CLOSING;
+                        end if;
+
+                    when CLOSING =>
+                        motor_open <= '0'; -- Motor encendido (M=0)
+                        -- Prioridad 1: Interrupción por botón (Alarma)
+                        if btn_open_falling = '1' then
+                            state       <= ALARM_STATE;
+                            timer_count <= 0;
+                        -- Prioridad 2: Control del tiempo (5 segundos)
+                        elsif timer_count >= (TIMER_5S_LIMIT - 1) then
+                            state       <= LOCKED;
+                            timer_count <= 0;
+                        else
+                            timer_count <= timer_count + 1;
+                        end if;
+
+                    when ALARM_STATE =>
+                        timer_count <= 0;
+                        led_alarm   <= '0'; -- Bocina/Alarma encendida
+                        if reset_falling = '1' then
+                            state <= LOCKED;
+                        end if;
+
+                    when others =>
+                        state <= LOCKED;
+                end case;
+            end if;
+        end if;
+    end process;
+
+    -----------------------------------------------------------------
+    -- 4. DECODIFICADOR DEL DISPLAY (Ánodo Común: '0'=Prende)
+    -----------------------------------------------------------------
+    process(state)
+    begin
+        case state is
+            when LOCKED =>
+                segmentos <= "1000111"; -- Letra "L"
+               
+            when OPENING =>
+                segmentos <= "1000000"; -- Letra "O"
+               
+            when OPENED =>
+                segmentos <= "0000000"; -- Letra "8"
+               
+            when PASSING =>
+                segmentos <= "0001100"; -- Letra "P" 
+               
+            when CLOSING =>
+                segmentos <= "1000110"; -- Letra "C"
+               
+            when ALARM_STATE =>
+                segmentos <= "0001000"; -- Letra "A"
+               
+            when others =>
+                segmentos <= "1111111"; -- Todo apagado
+        end case;
+    end process;
+	 -- Proceso para visualizar el estado en la simulación
+    process(state)
+    begin
+        case state is
+            when LOCKED      => debug_state <= "1001100"; -- 76 (L)
+            when OPENING     => debug_state <= "1001111"; -- 79 (O)
+            when OPENED      => debug_state <= "0111000"; -- 56 (8)
+            when PASSING     => debug_state <= "1010000"; -- 80 (P)
+            when CLOSING     => debug_state <= "1000011"; -- 67 (C)
+            when ALARM_STATE => debug_state <= "1000001"; -- 65 (A)
+            when others      => debug_state <= "0000000";
+        end case;
+    end process;
+
+end RTL;
