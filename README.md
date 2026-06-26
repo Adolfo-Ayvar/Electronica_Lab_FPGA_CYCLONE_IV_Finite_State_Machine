@@ -5,6 +5,9 @@ Implementacion de una maquina de estados finitos en FPGA CYCLONE IV EP4CE6E22C8
 Implementacion del ejercicio 2
 https://youtu.be/t3R79dXACjQ
 
+<img width="818" height="607" alt="image" src="https://github.com/user-attachments/assets/7052545a-04d6-429d-b172-ddbb187ffc27" />
+
+
 RESUMEN TÉCNICO: IMPLEMENTACIÓN DE SISTEMAS LÓGICOS SECUENCIALES
 
 1. ARQUITECTURA DE CONTROL (MÁQUINA DE ESTADOS)
